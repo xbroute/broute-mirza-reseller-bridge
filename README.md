@@ -46,17 +46,22 @@ This project treats production changes as transactions:
 curl -fsSL https://raw.githubusercontent.com/xbroute/broute-mirza-reseller-bridge/main/install.sh | sudo bash
 ```
 
-Then create one profile per reseller/Mirza instance:
+Then run the production wizard:
+
+```bash
+sudo broute-bridge-setup
+```
+
+The wizard validates the Reseller API before storing it, can configure an IP-restricted Nginx + Let's Encrypt endpoint, creates a restore point, and prints the `br_live_...` token **once**. Store that token in Mirza as the Mirza-Agent panel password/API key.
+
+Manual profile creation is also available; omit the API key argument so it is prompted without entering shell history:
 
 ```bash
 sudo broute-bridge profile-add \
   --name seller1 \
   --reseller-url https://reseller.example.com \
-  --reseller-api-key 'xui_live_...' \
   --inbounds '1,2,3'
 ```
-
-The command prints a `br_live_...` token **once**. Store that token in Mirza as the Mirza-Agent panel password/API key.
 
 Useful commands:
 
@@ -67,6 +72,7 @@ sudo broute-bridge backup --note before-xui-update
 sudo broute-bridge profile-list
 sudo broute-bridge rollback
 sudo broute-bridge-update
+sudo broute-bridge-setup
 ```
 
 ## Hong Kong / Mirza compatibility installation
@@ -83,7 +89,7 @@ Rollback the compatibility overlay:
 sudo broute-mirza-compat rollback
 ```
 
-The patcher changes only the Mirza Agent integration surface. It refuses to guess if the upstream source layout changes.
+Rollback disables the automatic re-apply watcher before restoring the original Mirza files. Re-enable it only after review with `sudo broute-mirza-compat watch-enable`. The patcher changes only the Mirza Agent integration surface and refuses to guess if upstream source anchors change.
 
 ## Mirza panel configuration
 
@@ -139,7 +145,7 @@ python -m venv .venv
 pip install -e '.[test]'
 pytest
 python -m compileall -q broute_bridge scripts
-bash -n install.sh scripts/install-mirza-compat.sh
+bash -n install.sh scripts/install-mirza-compat.sh scripts/setup-wizard.sh
 ```
 
 See `docs/ARCHITECTURE.md`, `docs/PRODUCTION.md`, `docs/ROLLBACK.md`, and `docs/UPSTREAM-RISKS.md` before production rollout.

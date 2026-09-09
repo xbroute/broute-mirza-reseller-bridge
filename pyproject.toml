@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "broute-mirza-reseller-bridge"
+version = "0.1.0"
+description = "Update-resistant MirzaBot to x-ui-reseller-panel bridge"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1",
+  "httpx>=0.27,<1",
+  "cryptography>=43,<50",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+broute-bridge = "broute_bridge.cli:main"
+broute-bridge-server = "broute_bridge.server:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
