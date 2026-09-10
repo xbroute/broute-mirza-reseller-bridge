@@ -189,7 +189,8 @@ def transform(root: Path) -> dict[Path, tuple[str, bool]]:
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    mode = path.stat().st_mode & 0o7777
+    original = path.stat()
+    mode = original.st_mode & 0o7777
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.broute-", dir=str(path.parent))
     tmp = Path(tmp_name)
     try:
@@ -198,7 +199,14 @@ def _atomic_write(path: Path, text: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(tmp, mode)
+        os.chown(tmp, original.st_uid, original.st_gid)
         os.replace(tmp, path)
+        # Make the directory entry durable as well as the file contents.
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     finally:
         if tmp.exists():
             tmp.unlink()
