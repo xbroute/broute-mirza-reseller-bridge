@@ -23,6 +23,23 @@ class ResellerError(RuntimeError):
 _CACHE_LOCK = threading.Lock()
 _USERS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
+# These fields are intentionally sourced from the reseller users summary because
+# that endpoint runs the panel's live-quota sync and represents the freshest
+# usage/status view. Future details endpoints must not accidentally override them
+# with stale local/config values.
+_LIVE_SUMMARY_FIELDS = {
+    "traffic_limit_bytes",
+    "used_bytes",
+    "total_used_bytes",
+    "usage_percent",
+    "expire_at_ms",
+    "expires_in",
+    "status",
+    "status_code",
+    "online",
+    "last_online_at",
+}
+
 
 def _cache_ttl() -> float:
     try:
@@ -69,8 +86,14 @@ def _merge_user_payload(payload: Any, summary: dict[str, Any] | None) -> Any:
     target = _user_object(result)
     if target is None:
         return result
+
+    # Details is authoritative for configuration/identity. Summary is then
+    # re-applied only for fields whose freshness contract is stronger there.
     merged = dict(summary)
     merged.update(target)
+    for field in _LIVE_SUMMARY_FIELDS:
+        if field in summary:
+            merged[field] = summary[field]
 
     if isinstance(result.get("user"), dict):
         result["user"] = merged
