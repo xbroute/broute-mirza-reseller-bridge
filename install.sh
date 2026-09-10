@@ -14,6 +14,7 @@ RELEASE="$RELEASES/$STAMP"
 RESTORE="$BACKUPS/install-$STAMP"
 PREVIOUS=""
 COMMITTED=0
+TMP=""
 HAD_SERVICE=0; HAD_ENV=0; HAD_KEY=0; HAD_DB=0; HAD_CURRENT=0; HAD_CLI=0; HAD_UPDATER=0; HAD_SETUP=0
 
 log(){ printf '[broute] %s\n' "$*"; }
@@ -33,9 +34,6 @@ ensure_bootstrap_dependencies(){
     DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl tar python3 python3-venv
   fi
 
-  # Ubuntu/Debian can have python3 installed while ensurepip/venv support is split
-  # into python3-venv. Probe an actual venv so the one-line installer fails early
-  # and with an actionable fix instead of halfway through a release transaction.
   probe="$(mktemp -d)"
   if ! python3 -m venv "$probe/venv" >/dev/null 2>&1; then
     rm -rf "$probe"
@@ -101,37 +99,41 @@ normalize_runtime_permissions(){
   if [[ -f "$STATE/bridge.db" ]]; then chmod 0600 "$STATE/bridge.db"; fi
 }
 
-rollback(){
-  rc=$?
-  trap - ERR
-  if [[ $COMMITTED -eq 0 ]]; then
-    log "Install/update failed; restoring pre-change state"
-    systemctl stop broute-bridge >/dev/null 2>&1 || true
-    if [[ $HAD_SERVICE -eq 0 ]]; then systemctl disable broute-bridge >/dev/null 2>&1 || true; fi
-    if [[ $HAD_CURRENT -eq 1 && -n "$PREVIOUS" && -d "$PREVIOUS" ]]; then ln -sfn "$PREVIOUS" "$CURRENT"; else rm -f "$CURRENT"; fi
-    if [[ $HAD_SERVICE -eq 1 ]]; then cp -a "$RESTORE/broute-bridge.service" /etc/systemd/system/broute-bridge.service; else rm -f /etc/systemd/system/broute-bridge.service; fi
-    if [[ $HAD_ENV -eq 1 ]]; then cp -a "$RESTORE/bridge.env" "$ETC/bridge.env"; else rm -f "$ETC/bridge.env"; fi
-    if [[ $HAD_KEY -eq 1 ]]; then cp -a "$RESTORE/master.key" "$ETC/master.key"; else rm -f "$ETC/master.key"; fi
-    if [[ $HAD_DB -eq 1 ]]; then cp -a "$RESTORE/bridge.db" "$STATE/bridge.db"; else rm -f "$STATE/bridge.db" "$STATE/bridge.db-wal" "$STATE/bridge.db-shm"; fi
-    if [[ $HAD_CLI -eq 1 ]]; then install -m 0755 "$RESTORE/broute-bridge.cli" /usr/local/bin/broute-bridge; else rm -f /usr/local/bin/broute-bridge; fi
-    if [[ $HAD_UPDATER -eq 1 ]]; then install -m 0755 "$RESTORE/broute-bridge-update.cli" /usr/local/bin/broute-bridge-update; else rm -f /usr/local/bin/broute-bridge-update; fi
-    if [[ $HAD_SETUP -eq 1 ]]; then install -m 0755 "$RESTORE/broute-bridge-setup.cli" /usr/local/bin/broute-bridge-setup; else rm -f /usr/local/bin/broute-bridge-setup; fi
-    normalize_runtime_permissions || true
-    systemctl daemon-reload || true
-    if [[ $HAD_SERVICE -eq 1 ]]; then systemctl restart broute-bridge || true; fi
-    rm -rf "$RELEASE"
-  fi
+rollback_state(){
+  log "Install/update failed; restoring pre-change state"
+  systemctl stop broute-bridge >/dev/null 2>&1 || true
+  if [[ $HAD_SERVICE -eq 0 ]]; then systemctl disable broute-bridge >/dev/null 2>&1 || true; fi
+  if [[ $HAD_CURRENT -eq 1 && -n "$PREVIOUS" && -d "$PREVIOUS" ]]; then ln -sfn "$PREVIOUS" "$CURRENT"; else rm -f "$CURRENT"; fi
+  if [[ $HAD_SERVICE -eq 1 ]]; then cp -a "$RESTORE/broute-bridge.service" /etc/systemd/system/broute-bridge.service; else rm -f /etc/systemd/system/broute-bridge.service; fi
+  if [[ $HAD_ENV -eq 1 ]]; then cp -a "$RESTORE/bridge.env" "$ETC/bridge.env"; else rm -f "$ETC/bridge.env"; fi
+  if [[ $HAD_KEY -eq 1 ]]; then cp -a "$RESTORE/master.key" "$ETC/master.key"; else rm -f "$ETC/master.key"; fi
+  if [[ $HAD_DB -eq 1 ]]; then cp -a "$RESTORE/bridge.db" "$STATE/bridge.db"; else rm -f "$STATE/bridge.db" "$STATE/bridge.db-wal" "$STATE/bridge.db-shm"; fi
+  if [[ $HAD_CLI -eq 1 ]]; then install -m 0755 "$RESTORE/broute-bridge.cli" /usr/local/bin/broute-bridge; else rm -f /usr/local/bin/broute-bridge; fi
+  if [[ $HAD_UPDATER -eq 1 ]]; then install -m 0755 "$RESTORE/broute-bridge-update.cli" /usr/local/bin/broute-bridge-update; else rm -f /usr/local/bin/broute-bridge-update; fi
+  if [[ $HAD_SETUP -eq 1 ]]; then install -m 0755 "$RESTORE/broute-bridge-setup.cli" /usr/local/bin/broute-bridge-setup; else rm -f /usr/local/bin/broute-bridge-setup; fi
+  normalize_runtime_permissions || true
+  systemctl daemon-reload || true
+  if [[ $HAD_SERVICE -eq 1 ]]; then systemctl restart broute-bridge || true; fi
+  rm -rf "$RELEASE"
+  log "Pre-change state restored from $RESTORE"
+}
+
+on_exit(){
+  local rc=$?
+  trap - EXIT ERR
+  set +e
+  [[ -n "$TMP" ]] && rm -rf "$TMP"
+  if [[ $rc -ne 0 && $COMMITTED -eq 0 ]]; then rollback_state; fi
   exit "$rc"
 }
-trap rollback ERR
+# EXIT, not only ERR, is intentional: explicit `exit` paths must roll back too.
+trap on_exit EXIT
 
-tmp="$(mktemp -d)"
-cleanup(){ rm -rf "$tmp"; }
-trap cleanup EXIT
+TMP="$(mktemp -d)"
 log "Downloading $REPO@$REF"
-curl -fsSL "https://github.com/$REPO/archive/refs/heads/$REF.tar.gz" -o "$tmp/src.tar.gz"
-tar -xzf "$tmp/src.tar.gz" -C "$tmp"
-src="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d | head -1)"
+curl -fsSL "https://github.com/$REPO/archive/refs/heads/$REF.tar.gz" -o "$TMP/src.tar.gz"
+tar -xzf "$TMP/src.tar.gz" -C "$TMP"
+src="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -1)"
 [[ -n "$src" && -f "$src/pyproject.toml" && -f "$src/deploy/systemd/broute-bridge.service" ]] || fail "Downloaded archive does not look like a Broute Bridge release"
 cp -a "$src/." "$RELEASE/"
 python3 -m compileall -q "$RELEASE/broute_bridge" "$RELEASE/scripts"
@@ -178,7 +180,6 @@ systemctl enable --now broute-bridge
 for _ in {1..20}; do curl -fsS http://127.0.0.1:8765/healthz >/dev/null && break; sleep 1; done
 curl -fsS http://127.0.0.1:8765/healthz >/dev/null || fail "Bridge health check failed. Inspect: journalctl -u broute-bridge -n 100 --no-pager"
 COMMITTED=1
-trap - ERR
 log "Installed release $STAMP from $REPO@$REF"
 log "Pre-change restore point: $RESTORE"
 log "Run production setup wizard: sudo broute-bridge-setup"
