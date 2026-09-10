@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-from scripts.mirza_patch import transform
+from scripts.mirza_patch import _atomic_write, transform
 
 
 def write_fixture(root: Path):
@@ -86,3 +87,18 @@ def test_patcher_is_idempotent_and_adds_only_agent_tls(tmp_path):
     assert agent.count("$req->setTlsVerify(true);") == agent.count("$req = new CurlRequest($url);")
     assert "reset_usage_mirza($panel, $username)" in panels
     assert "$Method_extend);" in panels
+
+
+def test_atomic_write_preserves_mode_owner_and_group(tmp_path):
+    path = tmp_path / "mirza.php"
+    path.write_text("old", encoding="utf-8")
+    os.chmod(path, 0o640)
+    before = path.stat()
+
+    _atomic_write(path, "new")
+
+    after = path.stat()
+    assert path.read_text(encoding="utf-8") == "new"
+    assert (after.st_mode & 0o7777) == 0o640
+    assert after.st_uid == before.st_uid
+    assert after.st_gid == before.st_gid
