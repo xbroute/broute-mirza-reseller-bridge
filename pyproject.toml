@@ -27,4 +27,5 @@ exclude = ["scripts*", "tests*", "deploy*", "docs*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-q"
