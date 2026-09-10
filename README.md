@@ -20,17 +20,24 @@ x-ui-reseller-panel -> 3x-ui Central -> Nodes
 - no permanent source modification to x-ui-reseller-panel or 3x-ui;
 - the minimal Mirza-Agent compatibility overlay is versioned, PHP-linted, watched, and reversible;
 - upstream contract checks run in CI and every six hours;
-- every project-owned production change has a restore or rollback path.
+- every project-owned production change has a restore or rollback path;
+- production installs follow the controlled `stable` branch, not arbitrary development commits on `main`.
+
+## Release channels
+
+`main` is the integrated development/default branch and must stay green. Production servers use `stable` by default. The `stable` branch is advanced only after the corresponding `main` commit has passed CI and review.
+
+You can override the source channel deliberately with `BROUTE_REF=...`, but normal production installs and updates should not need that.
 
 ## Germany: install Bridge
 
-After a release is merged to `main`:
+After a release has been promoted to `stable`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xbroute/broute-mirza-reseller-bridge/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/xbroute/broute-mirza-reseller-bridge/stable/install.sh | sudo env BROUTE_REF=stable bash
 ```
 
-The installer creates immutable releases under `/opt/broute-bridge/releases`, snapshots the previous project-owned service/config/key/database state, activates the new release, checks `/healthz`, and restores the old state automatically if activation fails.
+The installer checks/installs required Python venv support on Debian/Ubuntu when necessary, creates immutable releases under `/opt/broute-bridge/releases`, snapshots the previous project-owned service/config/key/database state, activates the new release, checks `/healthz`, and restores the old state automatically if activation fails.
 
 Then run the guided production setup:
 
@@ -45,10 +52,10 @@ The wizard explains every value before asking for it. It validates the `xui_live
 ## Hong Kong: Mirza compatibility
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xbroute/broute-mirza-reseller-bridge/main/scripts/install-mirza-compat.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/xbroute/broute-mirza-reseller-bridge/stable/scripts/install-mirza-compat.sh | sudo env BROUTE_REF=stable bash
 ```
 
-The installer explains the files it will change and creates a dated backup before writing. It changes Mirza Agent only to:
+The installer explains the files it may change and creates a dated source backup immediately before a required patch. If the source is already compatible it does not create a misleading duplicate source snapshot. It changes Mirza Agent only to:
 
 1. perform a real usage reset;
 2. forward `Methodextend` to the Bridge;
@@ -63,9 +70,11 @@ sudo broute-mirza-compat status
 sudo broute-mirza-compat check
 sudo broute-mirza-compat apply
 sudo broute-mirza-compat rollback
+sudo broute-mirza-compat watch-disable
+sudo broute-mirza-compat watch-enable
 ```
 
-`rollback` disables the automatic watcher first, restores the selected source snapshot, and PHP-lints the restored files before leaving them active.
+`rollback` disables the automatic watcher first, restores the selected source snapshot, and PHP-lints the restored files. `watch-enable` performs a compatibility check/apply before enabling automatic re-checks again.
 
 ## Configure the panel in Mirza
 
@@ -79,7 +88,7 @@ Password/API key: br_live_... printed by the Germany wizard
 
 Do not use Mirza's sample-user `set_inbounds` flow for this integration. Default inbound IDs are already validated against the reseller-visible inbound list by the Germany wizard.
 
-## Health and rollback
+## Health, backup and rollback
 
 Germany:
 
@@ -87,8 +96,11 @@ Germany:
 sudo broute-bridge doctor --live
 sudo broute-bridge backup --note before-xui-update
 sudo broute-bridge-setup rollback latest   # restore pre-setup Nginx + remove setup-created profile
-sudo broute-bridge rollback                # roll back the Bridge application release
+sudo broute-bridge rollback                # switch to a previous healthy code release
+sudo broute-bridge restore-state latest    # restore a matching DB + master-key snapshot when state/schema recovery is needed
 ```
+
+A Bridge state backup contains both the SQLite database and the matching encryption master key. `restore-state` verifies SQLite integrity and decryptability first, creates a safety snapshot of the currently-active state, and automatically restores that safety snapshot if the target state fails the Bridge health check.
 
 The setup rollback takes a safety snapshot of the current Nginx state first, validates the target with `nginx -t`, and refuses to delete the Bridge profile if the restored Nginx configuration is invalid.
 
@@ -109,7 +121,7 @@ No user is created or modified by the smoke script.
 
 ## Update compatibility
 
-`.github/workflows/upstream-watch.yml` checks current MirzaBot, x-ui-reseller-panel, and 3x-ui contracts every six hours. If a required contract changes, the workflow fails and opens/updates an `Upstream compatibility alert` issue. A new upstream version should not be treated as integration-safe until the check is green again.
+`.github/workflows/upstream-watch.yml` checks current MirzaBot, x-ui-reseller-panel, and 3x-ui contracts every six hours. If a required contract changes, the workflow fails and opens or updates an `Upstream compatibility alert` issue. When current contracts become compatible again, the automated alert is closed. A new Bridge version must not be promoted to `stable` while this check is failing.
 
 ## Security note about Mirza management API
 
