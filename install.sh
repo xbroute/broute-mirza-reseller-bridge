@@ -19,10 +19,40 @@ HAD_SERVICE=0; HAD_ENV=0; HAD_KEY=0; HAD_DB=0; HAD_CURRENT=0; HAD_CLI=0; HAD_UPD
 log(){ printf '[broute] %s\n' "$*"; }
 fail(){ echo "ERROR: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || fail "Run as root"
-for c in curl tar python3 systemctl; do command -v "$c" >/dev/null || fail "$c is required"; done
+
+ensure_bootstrap_dependencies(){
+  local missing=() c probe
+  for c in curl tar python3 systemctl useradd; do
+    command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+  done
+
+  if ((${#missing[@]})); then
+    command -v apt-get >/dev/null 2>&1 || fail "Missing required commands: ${missing[*]}. Install them first (including Python 3 with venv support)."
+    log "Installing missing bootstrap dependencies: ${missing[*]}"
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl tar python3 python3-venv
+  fi
+
+  # Ubuntu/Debian can have python3 installed while ensurepip/venv support is split
+  # into python3-venv. Probe an actual venv so the one-line installer fails early
+  # and with an actionable fix instead of halfway through a release transaction.
+  probe="$(mktemp -d)"
+  if ! python3 -m venv "$probe/venv" >/dev/null 2>&1; then
+    rm -rf "$probe"
+    command -v apt-get >/dev/null 2>&1 || fail "python3 venv support is missing. Install the distribution package that provides python3-venv, then rerun."
+    log "Installing python3-venv"
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv
+    probe="$(mktemp -d)"
+    python3 -m venv "$probe/venv" >/dev/null 2>&1 || { rm -rf "$probe"; fail "python3 -m venv is still unavailable after installing python3-venv"; }
+  fi
+  rm -rf "$probe"
+}
+
+ensure_bootstrap_dependencies
 
 mkdir -p "$RELEASES" "$ETC" "$STATE" "$BACKUPS" "$RESTORE"
-chmod 0700 "$ETC" "$STATE" "$BACKUPS"
+chmod 0700 "$STATE" "$BACKUPS" "$RESTORE"
 
 [[ -f /etc/systemd/system/broute-bridge.service ]] && HAD_SERVICE=1
 [[ -f "$ETC/bridge.env" ]] && HAD_ENV=1
@@ -57,6 +87,7 @@ HAD_UPDATER=$HAD_UPDATER
 HAD_SETUP=$HAD_SETUP
 PREVIOUS=$PREVIOUS
 EOF
+chmod 0600 "$RESTORE/manifest.env"
 
 rollback(){
   rc=$?
@@ -87,14 +118,23 @@ log "Downloading $REPO@$REF"
 curl -fsSL "https://github.com/$REPO/archive/refs/heads/$REF.tar.gz" -o "$tmp/src.tar.gz"
 tar -xzf "$tmp/src.tar.gz" -C "$tmp"
 src="$(find "$tmp" -mindepth 1 -maxdepth 1 -type d | head -1)"
+[[ -n "$src" && -f "$src/pyproject.toml" && -f "$src/deploy/systemd/broute-bridge.service" ]] || fail "Downloaded archive does not look like a Broute Bridge release"
 cp -a "$src/." "$RELEASE/"
 python3 -m compileall -q "$RELEASE/broute_bridge" "$RELEASE/scripts"
 python3 -m venv "$RELEASE/.venv"
 "$RELEASE/.venv/bin/pip" install -q --upgrade pip
 "$RELEASE/.venv/bin/pip" install -q "$RELEASE"
+"$RELEASE/.venv/bin/pip" check >/dev/null
 
 if ! id broute-bridge >/dev/null 2>&1; then useradd --system --home "$STATE" --shell /usr/sbin/nologin broute-bridge; fi
+
+# The service runs unprivileged and must be able to traverse /etc/broute-bridge
+# and read only its env/master key. Keep write access with root only.
+chown root:broute-bridge "$ETC"
+chmod 0750 "$ETC"
 chown -R broute-bridge:broute-bridge "$STATE"
+chmod 0700 "$STATE"
+
 if [[ ! -f "$ETC/master.key" ]]; then
   "$RELEASE/.venv/bin/python" - <<PY
 from pathlib import Path
@@ -102,7 +142,9 @@ from broute_bridge.crypto import SecretBox
 SecretBox.ensure_key_file(Path('$ETC/master.key'))
 PY
 fi
-chmod 0600 "$ETC/master.key"
+chown root:broute-bridge "$ETC/master.key"
+chmod 0640 "$ETC/master.key"
+
 if [[ ! -f "$ETC/bridge.env" ]]; then
 cat >"$ETC/bridge.env" <<EOF
 BROUTE_DB_PATH=$STATE/bridge.db
@@ -111,9 +153,11 @@ BROUTE_BIND_HOST=127.0.0.1
 BROUTE_BIND_PORT=8765
 BROUTE_VERIFY_RESELLER_TLS=true
 BROUTE_REPLAY_WINDOW_SECONDS=120
+BROUTE_USERS_CACHE_SECONDS=5
 EOF
 fi
-chmod 0600 "$ETC/bridge.env"
+chown root:broute-bridge "$ETC/bridge.env"
+chmod 0640 "$ETC/bridge.env"
 
 install -m 0644 "$RELEASE/deploy/systemd/broute-bridge.service" /etc/systemd/system/broute-bridge.service
 ln -sfn "$RELEASE" "$CURRENT"
@@ -127,7 +171,7 @@ ln -sfn "$CURRENT/scripts/setup-wizard.sh" /usr/local/bin/broute-bridge-setup
 systemctl daemon-reload
 systemctl enable --now broute-bridge
 for _ in {1..20}; do curl -fsS http://127.0.0.1:8765/healthz >/dev/null && break; sleep 1; done
-curl -fsS http://127.0.0.1:8765/healthz >/dev/null || fail "Bridge health check failed"
+curl -fsS http://127.0.0.1:8765/healthz >/dev/null || fail "Bridge health check failed. Inspect: journalctl -u broute-bridge -n 100 --no-pager"
 COMMITTED=1
 trap - ERR
 log "Installed release $STAMP"
