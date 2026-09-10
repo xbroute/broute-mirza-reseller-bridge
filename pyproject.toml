@@ -21,6 +21,10 @@ test = ["pytest>=8,<10"]
 broute-bridge = "broute_bridge.cli:main"
 broute-bridge-server = "broute_bridge.server:main"
 
+[tool.setuptools.packages.find]
+include = ["broute_bridge*"]
+exclude = ["scripts*", "tests*", "deploy*", "docs*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
