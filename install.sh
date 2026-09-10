@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 REPO="${BROUTE_REPO:-xbroute/broute-mirza-reseller-bridge}"
-REF="${BROUTE_REF:-main}"
+REF="${BROUTE_REF:-stable}"
 BASE="/opt/broute-bridge"
 RELEASES="$BASE/releases"
 CURRENT="$BASE/current"
@@ -75,6 +75,7 @@ python3 - <<PY
 import sqlite3
 src=sqlite3.connect('$STATE/bridge.db'); dst=sqlite3.connect('$RESTORE/bridge.db'); src.backup(dst); dst.close(); src.close()
 PY
+chmod 0600 "$RESTORE/bridge.db"
 fi
 cat >"$RESTORE/manifest.env" <<EOF
 HAD_SERVICE=$HAD_SERVICE
@@ -89,12 +90,24 @@ PREVIOUS=$PREVIOUS
 EOF
 chmod 0600 "$RESTORE/manifest.env"
 
+normalize_runtime_permissions(){
+  id broute-bridge >/dev/null 2>&1 || return 0
+  chown root:broute-bridge "$ETC"
+  chmod 0750 "$ETC"
+  if [[ -f "$ETC/master.key" ]]; then chown root:broute-bridge "$ETC/master.key"; chmod 0640 "$ETC/master.key"; fi
+  if [[ -f "$ETC/bridge.env" ]]; then chown root:broute-bridge "$ETC/bridge.env"; chmod 0640 "$ETC/bridge.env"; fi
+  chown -R broute-bridge:broute-bridge "$STATE"
+  chmod 0700 "$STATE"
+  if [[ -f "$STATE/bridge.db" ]]; then chmod 0600 "$STATE/bridge.db"; fi
+}
+
 rollback(){
   rc=$?
   trap - ERR
   if [[ $COMMITTED -eq 0 ]]; then
     log "Install/update failed; restoring pre-change state"
     systemctl stop broute-bridge >/dev/null 2>&1 || true
+    if [[ $HAD_SERVICE -eq 0 ]]; then systemctl disable broute-bridge >/dev/null 2>&1 || true; fi
     if [[ $HAD_CURRENT -eq 1 && -n "$PREVIOUS" && -d "$PREVIOUS" ]]; then ln -sfn "$PREVIOUS" "$CURRENT"; else rm -f "$CURRENT"; fi
     if [[ $HAD_SERVICE -eq 1 ]]; then cp -a "$RESTORE/broute-bridge.service" /etc/systemd/system/broute-bridge.service; else rm -f /etc/systemd/system/broute-bridge.service; fi
     if [[ $HAD_ENV -eq 1 ]]; then cp -a "$RESTORE/bridge.env" "$ETC/bridge.env"; else rm -f "$ETC/bridge.env"; fi
@@ -103,6 +116,7 @@ rollback(){
     if [[ $HAD_CLI -eq 1 ]]; then install -m 0755 "$RESTORE/broute-bridge.cli" /usr/local/bin/broute-bridge; else rm -f /usr/local/bin/broute-bridge; fi
     if [[ $HAD_UPDATER -eq 1 ]]; then install -m 0755 "$RESTORE/broute-bridge-update.cli" /usr/local/bin/broute-bridge-update; else rm -f /usr/local/bin/broute-bridge-update; fi
     if [[ $HAD_SETUP -eq 1 ]]; then install -m 0755 "$RESTORE/broute-bridge-setup.cli" /usr/local/bin/broute-bridge-setup; else rm -f /usr/local/bin/broute-bridge-setup; fi
+    normalize_runtime_permissions || true
     systemctl daemon-reload || true
     if [[ $HAD_SERVICE -eq 1 ]]; then systemctl restart broute-bridge || true; fi
     rm -rf "$RELEASE"
@@ -127,13 +141,7 @@ python3 -m venv "$RELEASE/.venv"
 "$RELEASE/.venv/bin/pip" check >/dev/null
 
 if ! id broute-bridge >/dev/null 2>&1; then useradd --system --home "$STATE" --shell /usr/sbin/nologin broute-bridge; fi
-
-# The service runs unprivileged and must be able to traverse /etc/broute-bridge
-# and read only its env/master key. Keep write access with root only.
-chown root:broute-bridge "$ETC"
-chmod 0750 "$ETC"
-chown -R broute-bridge:broute-bridge "$STATE"
-chmod 0700 "$STATE"
+normalize_runtime_permissions
 
 if [[ ! -f "$ETC/master.key" ]]; then
   "$RELEASE/.venv/bin/python" - <<PY
@@ -142,8 +150,6 @@ from broute_bridge.crypto import SecretBox
 SecretBox.ensure_key_file(Path('$ETC/master.key'))
 PY
 fi
-chown root:broute-bridge "$ETC/master.key"
-chmod 0640 "$ETC/master.key"
 
 if [[ ! -f "$ETC/bridge.env" ]]; then
 cat >"$ETC/bridge.env" <<EOF
@@ -156,8 +162,7 @@ BROUTE_REPLAY_WINDOW_SECONDS=120
 BROUTE_USERS_CACHE_SECONDS=5
 EOF
 fi
-chown root:broute-bridge "$ETC/bridge.env"
-chmod 0640 "$ETC/bridge.env"
+normalize_runtime_permissions
 
 install -m 0644 "$RELEASE/deploy/systemd/broute-bridge.service" /etc/systemd/system/broute-bridge.service
 ln -sfn "$RELEASE" "$CURRENT"
@@ -174,7 +179,7 @@ for _ in {1..20}; do curl -fsS http://127.0.0.1:8765/healthz >/dev/null && break
 curl -fsS http://127.0.0.1:8765/healthz >/dev/null || fail "Bridge health check failed. Inspect: journalctl -u broute-bridge -n 100 --no-pager"
 COMMITTED=1
 trap - ERR
-log "Installed release $STAMP"
+log "Installed release $STAMP from $REPO@$REF"
 log "Pre-change restore point: $RESTORE"
 log "Run production setup wizard: sudo broute-bridge-setup"
 log "Or add a seller manually: sudo broute-bridge profile-add --name NAME --reseller-url https://... --inbounds 1,2"
